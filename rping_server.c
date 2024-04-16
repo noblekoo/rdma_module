@@ -34,13 +34,9 @@
 #include <time.h> //for random hash table key
 #include <stdlib.h> //for random hash table key
 #include <sys/time.h>
-#include <semaphore.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <linux/netlink.h>
-#include <unistd.h>
 #include "common.h"  // NOLINT(build/include_subdir)
-#include "rping_test.h"
+#include "rping.h"
+#include "lambda.h"
 //#include "time_util.h"
 
 //#define PRINT_TIME 1
@@ -81,11 +77,7 @@ static void print_time_stat(void) { }
 
 #define SZ_4K 4096
 #define SZ_2M 2097152
-
-#define MAX_PAYLOAD 2101376
-#define MSG_TYPE1 0x10
-#define MSG_TYPE2 0x20
-#define NETLINK_USER 31
+#define MTU 4096
 
 #define THREAD_NUM 1
 static pthread_t th_pool[10];
@@ -93,13 +85,6 @@ static pthread_t th_pool[10];
 struct extent_t {
     uint64_t addr : 40; // in bytes, 1TB
     uint64_t len : 24; // in bytes, 16MB
-};
-
-struct nvme_meta {
-    int64_t size_o;
-    uint64_t calc_ns;
-    uint64_t pre_ns;
-    char buf_o[0];
 };
 
 // static int handle_request(struct rping_cb *cb);
@@ -151,7 +136,7 @@ static int rping_cma_event_handler(struct rdma_cm_id *cma_id,
 
     case RDMA_CM_EVENT_CONNECT_RESPONSE:
         DEBUG_LOG("CONNECT_RESPONSE\n");
-        if (!cb->server) {
+        if (!cb->server){
             cb->state = CONNECTED;
         }
         sem_post(&cb->sem);
@@ -217,19 +202,10 @@ static int server_recv(struct rping_cb *cb, struct ibv_wc *wc) {
     // printf("Received rkey %x addr %" PRIx64 " len %d from peer\n",
     //       cb->remote_rkey, cb->remote_addr, cb->remote_len);
 
-    printf("server_recv\n");
-    // if (cb->state <= CONNECTED || cb->state == RDMA_REP_COMPLETE)
-    //     cb->state = RDMA_REQ_ADV;
-    // else
-    //     cb->state = RDMA_REP_ADV;
-    if (cb->state == RDMA_REQ_ADV)
-        cb->state = RDMA_REQ_COMPLETE;
-    else if (cb->state == RDMA_REP_ADV)
-        cb->state = RDMA_REP_COMPLETE;
-    else {
-        printf("(ERROR) cb->state(%d) is incorrect.\n", cb->state);
-        return -1;
-    }
+    if (cb->state <= CONNECTED || cb->state == RDMA_REP_COMPLETE)
+        cb->state = RDMA_REQ_ADV;
+    else
+        cb->state = RDMA_REP_ADV;
 
     return 0;
 }
@@ -405,7 +381,6 @@ static int rping_disconnect(struct rping_cb *cb, struct rdma_cm_id *id) {
 }
 
 static void rping_setup_wr(struct rping_cb *cb) {
-    
     cb->recv_sgl.addr = (uint64_t) &cb->recv_buf;
     cb->recv_sgl.length = sizeof cb->recv_buf;
     cb->recv_sgl.lkey = cb->recv_mr->lkey;
@@ -541,14 +516,10 @@ static int rping_create_qp(struct rping_cb *cb) {
         attr.pkey_index = 0;
         attr.port_num = id->port_num;
         attr.qp_access_flags = 0;
-        //attr.path_mtu = IBV_MTU_4096;
-
-        // ret = ibv_modify_qp(cb->qp, &attr,
-        //             IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_PKEY_INDEX |
-        //             IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
+        attr.path_mtu = IBV_MTU_4096;
 
         ret = ibv_modify_qp(cb->qp, &attr,
-                    IBV_QP_STATE | IBV_QP_PKEY_INDEX |
+                    IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_PKEY_INDEX |
                     IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
 
         if (ret) {
@@ -888,61 +859,64 @@ static int post_send_wr(struct rping_cb *cb) {
 
 // }
 
-// int rdma_server(struct rping_cb *cb, sem_t *t_sem) {
-//     int ret;
-//     char *recv_buf, *send_buf;
-//     struct nvme_passthru_cmd *cmd;
-//     struct lu_fid *fid;
+int rdma_server(struct rping_cb *cb, sem_t *t_sem) {
+    int ret;
+    char *recv_buf, *send_buf;
+    struct nvme_passthru_cmd *cmd;
+    struct lu_fid *fid;
 
-//     //srand(time(NULL));
+    //srand(time(NULL));
 
-//     while (1) {
-//         sem_wait(t_sem);
+    while (1) {
+        sem_wait(t_sem);
 
-//         if (cb->state != RDMA_REQ_ADV) {
-// 			fprintf(stderr, "(State error) wait for RDMA_REQ_ADV state %d\n",
-// 				cb->state);
-// 			ret = -1;
-// 			break;
-// 		}
+        if (cb->state != RDMA_REQ_ADV) {
+			fprintf(stderr, "(State error) wait for RDMA_REQ_ADV state %d\n",
+				cb->state);
+			ret = -1;
+			break;
+		}
 
-//         call_lambda(&cb->recv_buf.buf, &cb->send_buf.buf, cb->cb_num);
+        call_lambda(&cb->recv_buf.buf, &cb->send_buf.buf, cb->cb_num);
 
-//         // if (cb->verbose)
-//         // printf("server ping data: %s\n", cb->rdma_buf);
-//         //DEBUG_LOG("fid1.f_seq=%lu fid1.f_old=%u fid1.f_ver=%u recved_cnt=%lu\n",
-//         //    fid->f_seq, fid->f_oid, fid->f_ver, recved_cnt);
-//         // Get meta data.
-//         //data = mdcache_get(rand() % 10000, h);
-//         // 1 memcpy occurs.
-//         //fill_mb((struct mdt_body *)cb->send_buf.buf, data);
-//         // fill_mb_with_dummy_data((struct mdt_body *)cb->send_buf.buf);
+        // if (cb->verbose)
+        // printf("server ping data: %s\n", cb->rdma_buf);
+        //DEBUG_LOG("fid1.f_seq=%lu fid1.f_old=%u fid1.f_ver=%u recved_cnt=%lu\n",
+        //    fid->f_seq, fid->f_oid, fid->f_ver, recved_cnt);
+        // Get meta data.
+        //data = mdcache_get(rand() % 10000, h);
+        // 1 memcpy occurs.
+        //fill_mb((struct mdt_body *)cb->send_buf.buf, data);
+        // fill_mb_with_dummy_data((struct mdt_body *)cb->send_buf.buf);
 
-//         // TODO: [Optimize] Remove post recv overhead from critical path.
-//         // Post a recv WR (request) before sending response.
-//         if (ret = post_recv_wr(cb)){
-//             fprintf(stderr, "post send wr error %d\n", ret);
-//             break;
-//         }
+        // TODO: [Optimize] Remove post recv overhead from critical path.
+        // Post a recv WR (request) before sending response.
+        if (ret = post_recv_wr(cb)){
+            fprintf(stderr, "post send wr error %d\n", ret);
+            break;
+        }
 
-//         // DEBUG_TIME_START(evt_wait_recv_cq);
-//         // sem_wait(&cb->sem);
-//         // DEBUG_TIME_END(evt_wait_recv_cq);
+        cb->send_sgl.length = ((struct nvme_meta *)cb->send_buf.buf)->size_o + sizeof(struct nvme_meta);
+        printf("send_size: %llu\n", cb->send_sgl.length);
 
-//         // Post a send WR (response) and poll its CQE.
-//         if(ret = post_send_wr(cb)){
-//             fprintf(stderr, "post send wr error %d\n", ret);
-//             break;
-//         }
-//         // DEBUG_TIME_START(evt_wait_send_cq);
-//         // sem_wait(&cb->sem);
-//         // DEBUG_TIME_END(evt_wait_send_cq);
-//     }
+        // DEBUG_TIME_START(evt_wait_recv_cq);
+        // sem_wait(&cb->sem);
+        // DEBUG_TIME_END(evt_wait_recv_cq);
 
-//     //print_time_stat();
+        // Post a send WR (response) and poll its CQE.
+        if(ret = post_send_wr(cb)){
+            fprintf(stderr, "post send wr error %d\n", ret);
+            break;
+        }
+        // DEBUG_TIME_START(evt_wait_send_cq);
+        // sem_wait(&cb->sem);
+        // DEBUG_TIME_END(evt_wait_send_cq);
+    }
 
-//     return (cb->state == DISCONNECTED) ? 0 : ret;
-// }
+    //print_time_stat();
+
+    return (cb->state == DISCONNECTED) ? 0 : ret;
+}
 
 // static int rping_test_server(struct rping_cb *cb, khash_t(mdcache) *h) {
 //     int ret;
@@ -1041,71 +1015,6 @@ static void free_cb(struct rping_cb *cb) {
     free(cb);
 }
 
-int rping_connect_client(struct rping_cb *cb)
-{
-	struct rdma_conn_param conn_param;
-	int ret;
-
-	memset(&conn_param, 0, sizeof conn_param);
-	conn_param.responder_resources = 1;
-	conn_param.initiator_depth = 1;
-	conn_param.retry_count = 7;
-
-	ret = rdma_connect(cb->cm_id, &conn_param);
-	if (ret) {
-		perror("rdma_connect");
-		return ret;
-	}
-
-	sem_wait(&cb->sem);
-	if (cb->state != CONNECTED) {
-		fprintf(stderr, "wait for CONNECTED state %d\n", cb->state);
-		return -1;
-	}
-
-	DEBUG_LOG("rmda_connect successful\n");
-	return 0;
-}
-
-int rping_bind_client(struct rping_cb *cb)
-{
-	int ret;
-    struct addrinfo *res;
-
-    ret = getaddrinfo("192.168.14.118", NULL, NULL, &res);
-    if (ret) {
-        perror("getaddrinfo");
-        return ret;
-    }
-    memcpy(&cb->sin, res->ai_addr, sizeof(struct sockaddr_in));
-
-    freeaddrinfo(res);
-
-	if (cb->sin.ss_family == AF_INET)
-		((struct sockaddr_in *) &cb->sin)->sin_port = cb->port;
-	else
-		((struct sockaddr_in6 *) &cb->sin)->sin6_port = cb->port;
-
-    printf("addr: %u\n", ((struct sockaddr_in *)&cb->sin)->sin_addr.s_addr);
-retry:
-	ret = rdma_resolve_addr(cb->cm_id, NULL, (struct sockaddr *) &cb->sin, 2000);
-	if (ret) {
-		//perror("rdma_resolve_addr");
-		//return ret;
-        goto retry;
-	}
-
-	sem_wait(&cb->sem);
-	if (cb->state != ROUTE_RESOLVED) {
-		fprintf(stderr, "waiting for addr/route resolution state %d\n",
-			cb->state);
-		return -1;
-	}
-
-	DEBUG_LOG("rdma_resolve_addr - rdma_resolve_route successful\n");
-	return 0;
-}
-
 // static void *rping_test_server_thread(void *arg) {
 //     struct rping_cb *cb = (struct rping_cb *)arg;
 //     rping_test_server(cb);
@@ -1129,17 +1038,17 @@ void *t_rping_run_server(void *arg) {
 
 
     DEBUG_LOG("rping_bind_server before\n");
-    ret = rping_bind_client(cb);
+    ret = rping_bind_server(cb);
     DEBUG_LOG("rping_bind_server after\n");
 
-    // sem_wait(&cb->sem);
-    // if (cb->state != CONNECT_REQUEST) {
-    //     fprintf(stderr, "wait for CONNECT_REQUEST state %d\n",
-    //         cb->state);
-    // }
+    sem_wait(&cb->sem);
+    if (cb->state != CONNECT_REQUEST) {
+        fprintf(stderr, "wait for CONNECT_REQUEST state %d\n",
+            cb->state);
+    }
 
     DEBUG_LOG("rping_setup_qp before\n");
-    ret = rping_setup_qp(cb, cb->cm_id);
+    ret = rping_setup_qp(cb, cb->child_cm_id);
     if (ret) {
         fprintf(stderr, "setup_qp failed: %d\n", ret);
     }
@@ -1150,14 +1059,11 @@ void *t_rping_run_server(void *arg) {
         //goto err1;
     }
 
-    printf("before post_recv\n");
-    printf("bufsize: %llu\n", BUF_SIZE);
-
     // struct ibv_recv_wr ex_wr;
     // ex_wr.sg_list = &cb->recv_sgl;
     // ex_wr.num_sge = 1;
 
-    // // Event-driven scheduling.////////////////////////
+    // Event-driven scheduling.////////////////////////
     ret = ibv_post_recv(cb->qp, &cb->rq_wr, &bad_wr);
     //ret = ibv_post_recv(cb->qp, &ex_wr, &bad_wr);
     if (ret) {
@@ -1165,7 +1071,6 @@ void *t_rping_run_server(void *arg) {
         //goto err2;
     }
     DEBUG_LOG("recv posted\n");
-    printf("after post_recv\n");
 
     thread_cb->cb = cb;
     thread_cb->t_sem = t_sem;
@@ -1180,19 +1085,11 @@ void *t_rping_run_server(void *arg) {
     // DEBUG_LOG("Press enter to accept:");
     // getchar();
 
-    // ret = rping_accept(cb);
-    // if (ret) {
-    //     fprintf(stderr, "connect error %d\n", ret);
-    //     goto err2;
-    // }
-
-    ret = rping_connect_client(cb);
-	if (ret) {
-		fprintf(stderr, "connect error %d\n", ret);
-		//goto err3;
-	}
-
-    printf("new rdma connection %d\n", cb->cb_num);
+    ret = rping_accept(cb);
+    if (ret) {
+        fprintf(stderr, "connect error %d\n", ret);
+        //goto err2;
+    }
 
     // DEBUG_LOG("Press enter to test server:");
     // getchar();
@@ -1220,112 +1117,20 @@ void *t_rping_run_server(void *arg) {
     // for (i = 0; i < 10000; i++)
     //     mdcache_insert(i, data, h);
     // ret = rping_test_server(cb, h);
-    // ret = rdma_server(cb, t_sem);
-    // if (ret) {
-    //     fprintf(stderr, "rping server failed: %d\n", ret);
-    //     goto err3;
-    // }
-
-    const struct ibv_send_wr *bad_send_wr;
-    const struct ibv_recv_wr *bad_recv_wr;
-    struct ibv_wc send_wc;
-    struct ibv_wc recv_wc;
-    uint32_t recv_size;
-
-    while (1) {
-        //sem_wait(t_sem);
-
-        //nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
-        char test[2105344];
-        for (int i=0; i<2105344; i++){
-            if (i > 1024)
-                test[i] = 'b';
-            else
-                test[i] = 'a';
-            //test[i] = 'a';
-        }
-
-        printf("message received\n");
-
-        //cb->send_sgl.addr = NLMSG_DATA(nlh);
-        //cb->send_sgl.length = nlh->nlmsg_len - NLMSG_SPACE(0);
-        //cb->send_sgl.lkey = 0;
-        cb->send_sgl.length = 4096;
-
-        memcpy(cb->send_buf.buf, test, 4096);
-        //memcpy(cb->send_buf.buf, test, BUF_SIZE);
-        //cb->send_sgl.length = nlh->nlmsg_len - NLMSG_SPACE(0);
-
-        //printf("send_sgl.addr: %llu send_sgl.length: %llu\n", cb->send_sgl.addr,cb->send_sgl.length);
-
-        //cb->sq_wr.opcode = IBV_WR_SEND;
-        //cb->sq_wr.send_flags = IBV_SEND_INLINE|IBV_SEND_SIGNALED;
-        //cb->sq_wr.send_flags = IBV_SEND_SIGNALED;
-        //cb->sq_wr.sg_list = &cb->send_sgl;
-        //cb->sq_wr.num_sge = 1;
-        cb->state = RDMA_REQ_ADV;
-
-        ret = ibv_post_send(cb->qp, &cb->sq_wr, &bad_send_wr);
-        if (ret){
-            printf("post send error %d\n", ret);
-            break;
-        }
-        send_wr_posted_cnt++;
-        pending_cnt++;
-
-        printf("rdma message sent\n");
-
-        cb->state = RDMA_REP_ADV;
-
-        ret = ibv_post_recv(cb->qp, &cb->rq_wr, &bad_recv_wr);
-
-        recv_wr_posted_cnt++;
-
-        while ((ret = ibv_poll_cq(cb->cq, 1, &send_wc)) == 0){}
-
-        if (send_wc.status != IBV_WC_SUCCESS){
-            printf("Send cq completion failed with "
-                            "wr_id %Lx status %d opcode %d vender_err %x\n",
-                                send_wc.wr_id, send_wc.status, send_wc.opcode, send_wc.vendor_err);
-            break;
-        }
-        if (send_wc.opcode != IBV_WC_SEND){
-            printf("cq completion wrong op code: not IBV_WC_SEND\n");
-        }
-
-        while ((ret = ibv_poll_cq(cb->cq, 1, &recv_wc)) == 0){}
-
-        if (recv_wc.status != IBV_WC_SUCCESS){
-            printf("Recv cq completion failed with "
-                            "wr_id %Lx status %d opcode %d vender_err %x\n",
-                                recv_wc.wr_id, recv_wc.status, recv_wc.opcode, recv_wc.vendor_err);
-            break;
-        }
-        if (recv_wc.opcode != IBV_WC_RECV){
-            printf("cq completion wrong op code: not IBV_WC_RECV\n");
-        }
-
-        char recv[2105344];
-
-        // KOO TODO: How do I know the receive size? size_o of the struct nvme_meta
-        memcpy(recv, cb->recv_buf.buf, BUF_SIZE);
-
-        printf("message received: %c %c\n", recv[0], recv[BUF_SIZE-1]);
-        // if(ret = post_send_wr(cb)){
-        //     fprintf(stderr, "post send wr error %d\n", ret);
-        //     break;
-        // }
-        break;
+    ret = rdma_server(cb, t_sem);
+    if (ret) {
+        fprintf(stderr, "rping server failed: %d\n", ret);
+        //goto err3;
     }
 
     ret = 0;
-// //err3:
+// err3:
 //     rping_disconnect(cb, cb->child_cm_id);
 //     //pthread_join(cb->cqthread, NULL);
 //     rdma_destroy_id(cb->child_cm_id);
-// //err2:
+// err2:
 //     rping_free_buffers(cb);
-// //err1:
+// err1:
 //     rping_free_qp(cb);
 //     rdma_destroy_id(cb->cm_id);
 //     rdma_destroy_event_channel(cb->cm_channel);
@@ -1467,48 +1272,14 @@ main(int argc, char **argv)
 {
 	int rc;
 
+    nvmf_init();
+
 	struct rping_cb *cb[CB_THREAD];
     int op;
     int ret = 0;
     int persistent_server = 0;
     int i;
     pthread_t thread[CB_THREAD];
-
-
-    // // KOO TODO: To check device capabilities.
-    // // Get list of all RDMA devices
-    // struct ibv_device **dev_list;
-    // struct ibv_context *context;
-    // struct ibv_port_attr port_attr;
-
-    // // Get list of all RDMA devices
-    // dev_list = ibv_get_device_list(NULL);
-    // if (!dev_list) {
-    //     perror("Failed to get RDMA devices list");
-    //     return 1;
-    // }
-
-    // // Assume we use the first device (for simplicity)
-    // context = ibv_open_device(dev_list[0]);
-    // if (!context) {
-    //     perror("Failed to open device");
-    //     ibv_free_device_list(dev_list);
-    //     return 1;
-    // }
-
-    // // Query the port attributes of the first port (port_num = 1)
-    // ret = ibv_query_port(context, 1, &port_attr);
-    // if (ret != 0) {
-    //     perror("Failed to query port");
-    //     ibv_close_device(context);
-    //     ibv_free_device_list(dev_list);
-    //     return 1;
-    // }
-
-    // // Print the maximum message size
-    // printf("Maximum message size supported by the port: %u\n", port_attr.max_mtu);
-    // printf("active message size supported by the port: %u\n", port_attr.active_mtu);
-
 
     for (i=0; i<CB_THREAD; i++){
     	cb[i] = (struct rping_cb *)malloc(sizeof(struct rping_cb));
@@ -1517,7 +1288,7 @@ main(int argc, char **argv)
 
     	memset(cb[i], 0, sizeof(struct rping_cb));
         cb[i]->cb_num = i;
-    	cb[i]->server = 0;
+    	cb[i]->server = 1;
     	cb[i]->state = IDLE;
     	// cb->size = 64;
     	cb[i]->size = sizeof(struct rping_rdma_info);
@@ -1526,6 +1297,71 @@ main(int argc, char **argv)
     	sem_init(&cb[i]->sem, 0, 0);
     }
 
+    while ((op = getopt(argc, argv, "a:I:p:C:S:t:svVdq")) != -1) {
+        switch (op) {
+        //case 'a':
+        //    ret = get_addr(optarg, (struct sockaddr *) &cb->sin);
+        //    break;
+        //case 'I':
+        //    ret = get_addr(optarg, (struct sockaddr *) &cb->ssource);
+        //    break;
+        //case 'p':
+        //    cb->port = htobe16(atoi(optarg));
+        //    DEBUG_LOG("port %d\n", (int) atoi(optarg));
+        //    break;
+        case 's':
+	    for (i=0; i<CB_THREAD; i++)
+            	cb[i]->server = 1;
+            DEBUG_LOG("server\n");
+            break;
+        //case 'S':
+        //    cb->size = atoi(optarg);
+        //    if ((cb->size < RPING_MIN_BUFSIZE) ||
+        //        (cb->size > (RPING_BUFSIZE - 1))) {
+        //        fprintf(stderr, "Invalid size %d "
+        //               "(valid range is %zd to %d)\n",
+        //               cb->size, RPING_MIN_BUFSIZE, RPING_BUFSIZE);
+        //        ret = EINVAL;
+        //    } else {
+        //        DEBUG_LOG("size %d\n", (int) atoi(optarg));
+        //    }
+        //    break;
+        case 'C':
+	    for (i=0; i<CB_THREAD; i++){
+            	cb[i]->count = atoi(optarg);
+            	if (cb[i]->count < 0) {
+                	fprintf(stderr, "Invalid count %d\n",
+                    	cb[i]->count);
+                	ret = EINVAL;
+            	} else {
+                	DEBUG_LOG("count %d\n", (int) cb[i]->count);
+            	}
+	    }
+            break;
+        case 'v':
+	    for (i=0; i<CB_THREAD; i++)
+            	cb[i]->verbose++;
+            DEBUG_LOG("verbose\n");
+            break;
+        //case 'V':
+        //    cb->validate++;
+        //    DEBUG_LOG("validate data\n");
+        //    break;
+        case 'd':
+            debug++;
+            break;
+        //case 'q':
+        //    cb->self_create_qp = 1;
+        //    break;
+        default:
+            usage("rping");
+            ret = EINVAL;
+            goto out;
+        }
+    }
+    if (ret)
+        goto out;
+    
     // h = mdcache_init();
     // fill_mb_with_dummy_data(&(data->body)); // TODO: load files into hash table later
     // for (i = 0; i < 10000; i++)
@@ -1562,10 +1398,11 @@ main(int argc, char **argv)
     for (i=0; i<CB_THREAD; i++){
 		pthread_join(thread[i], NULL);
 	}
-
     for (i=0; i<CB_THREAD; i++){
+        rping_disconnect(cb[i], cb[i]->child_cm_id);
+        //pthread_join(cb->cqthread, NULL);
+        rdma_destroy_id(cb[i]->child_cm_id);
         rping_free_buffers(cb[i]);
-        rping_disconnect(cb[i], cb[i]->cm_id);
         rping_free_qp(cb[i]);
         rdma_destroy_id(cb[i]->cm_id);
         rdma_destroy_event_channel(cb[i]->cm_channel);
@@ -1580,6 +1417,8 @@ out:
     
 	// while (1)
 	//     sleep(1000);
+
+    cleanup_spdk();
 
 	return 0;
 }
